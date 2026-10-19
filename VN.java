@@ -1,7 +1,10 @@
+
 import java.io.*;
 import java.nio.ByteBuffer;
 import java.net.*;
 import java.util.Arrays;
+import java.util.List;
+import java.util.ArrayList;
 
 class VirtualNode {
     int IPaddress, UDPport;
@@ -25,32 +28,50 @@ class Neighbour extends VirtualNode{
 public class VN {
     public static void main(String[] args) throws IOException {
         InetAddress localIp = InetAddress.getLocalHost();
-        short portNumber = Short.parseShort(args[1]);
+        int portNumber = Integer.parseInt(args[0]);
 
-        Socket socket = new Socket(localIp.getHostAddress(), portNumber);
+        Socket socket = new Socket(localIp, 5000);
+        DatagramSocket udpSocket = new DatagramSocket(portNumber);
 
         byte[] ipBytes = localIp.getAddress();
 
         ByteBuffer sendbuffer = ByteBuffer.allocate(6);
         sendbuffer.put(ipBytes);
-        sendbuffer.putShort(portNumber);
+        sendbuffer.putShort((short) portNumber);
 
         OutputStream out = socket.getOutputStream();
-        InputStream in = socket.getInputStream();
-        ByteArrayOutputStream byteBuffer = new ByteArrayOutputStream();
+        DataInputStream din = new DataInputStream(socket.getInputStream());
 
         out.write(sendbuffer.array());
         out.flush();
 
-        byte[] receivebuffer = new byte[1024];
-        int bytesRead;
+        while (true) {
+            int count;
 
-        while((bytesRead = in.read(receivebuffer)) != -1) {
-            byteBuffer.write(receivebuffer, 0, bytesRead);
+            try {
+                count = din.readUnsignedShort();
+            } catch (EOFException e) {
+                break;
+            }
+
+            List<Neighbour> neighbours = new ArrayList<>();
+
+            for (int i = 0; i < count; i++) {
+                char name = (char) din.readUnsignedByte();
+                int neighbourIP = din.readInt();
+                int neighbourPort = din.readUnsignedShort();
+                int cost = din.readUnsignedByte();
+
+                Neighbour neighbour = new Neighbour(
+                    neighbourIP, neighbourPort, cost, name
+                );
+                neighbours.add(neighbour);
+
+                System.out.println("Neighbour: " + neighbour.name + ", IP: " + neighbour.IPaddress + ", Port: " + neighbour.UDPport + ", Cost: " + neighbour.cost);
+            }
         }
 
         socket.close();
+        udpSocket.close();
     }
 }
-
-
