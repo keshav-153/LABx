@@ -1,4 +1,3 @@
-
 #include<iostream>
 #include<fstream>
 #include<string>
@@ -6,6 +5,7 @@
 #include<sstream>
 #include <cstring>
 #include <cstdint>
+#include <cstdlib>
 #include <unistd.h>
 #include <sys/select.h>
 #include<sys/socket.h>
@@ -25,11 +25,24 @@ public:
     TCP(int p) {
         port = p;
         fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) {
+            perror("socket");
+            exit(1);
+        }
+
+        add = {};
         add.sin_family = AF_INET;
         add.sin_addr.s_addr = INADDR_ANY;
         add.sin_port = htons(port);
-        bind(fd, (struct sockaddr*)&add, sizeof(add));
-        listen(fd, 10);
+
+        if (::bind(fd, (struct sockaddr*)&add, sizeof(add)) < 0) {
+            perror("bind");
+            exit(1);
+        }
+        if (listen(fd, 10) < 0) {
+            perror("listen");
+            exit(1);
+        }
     }
 };
 
@@ -58,8 +71,18 @@ public:
 };
 
 int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        cerr << "Usage: ./ON topology_file" << endl;
+        return 1;
+    }
+
     string file = argv[1];
     ifstream f(file);
+    if (!f) {
+        cerr << "Cannot open topology file: " << file << endl;
+        return 1;
+    }
+
     string line;
     int nodes = 1;
     while(getline(f, line)) nodes++;
@@ -68,13 +91,13 @@ int main(int argc, char* argv[]) {
 
     f.clear();
     f.seekg(0, ios::beg);
-    
+
     for (int i = 0; i < nodes - 1; i++) {
         getline(f, line);
         stringstream ss(line);
         vector<int> costs;
         int cst;
-        while (ss >> cst) 
+        while (ss >> cst)
             costs.push_back(cst);
 
         for (int j = i+1; j < nodes; j++) {
@@ -85,22 +108,35 @@ int main(int argc, char* argv[]) {
             }
         }
     }
-    
+
     for (int i = 0; i < nodes; i++) {
         cout << char('A' + i) << ": ";
-        for (auto e: INFO.adj[i]) 
+        for (auto e: INFO.adj[i])
             cout << "(" << e.first << ", " << e.second << ") ";
         cout << endl;
     }
 
-    TCP server(5000);
-    cout << "ON listening (port 5000)" << endl;
+    TCP server(6000);
+    cout << "ON listening (port 6000)" << endl;
+
     while (INFO.v.size() < INFO.N) {
         sockaddr_in client;
         socklen_t len = sizeof(client);
         int cfd = accept(server.fd, (struct sockaddr*)&client, &len);
+        if (cfd < 0) {
+            perror("accept");
+            continue;
+        }
+
         char msg[6];
-        recv(cfd, msg, 6, MSG_WAITALL);
+        int n = recv(cfd, msg, 6, MSG_WAITALL);
+        if (n != 6) {
+            cerr << "VN registration failed: received "
+                 << n << " bytes" << endl;
+            close(cfd);
+            continue;
+        }
+
         uint32_t ip;
         memcpy(&ip, msg, 4);
         int udp = (uc)msg[4] * 256 + (uc)msg[5];
@@ -113,14 +149,15 @@ int main(int argc, char* argv[]) {
         vector<char> msg;
         us count = htons(INFO.adj[i].size() + 1);
         msg.insert(msg.end(), (char*)&count, (char*)&count + 2);
-        
+
         for (int j = 0; j < INFO.N; j++) {
             int cost = -1;
             if (i == j) cost = 0;
             else {
-                for (auto e: INFO.adj[i]) 
+                for (auto e: INFO.adj[i])
                     if (e.first == INFO.v[j].Id) {
-                        cost = e.second; break;
+                        cost = e.second;
+                        break;
                     }
             }
 
@@ -133,7 +170,9 @@ int main(int argc, char* argv[]) {
             msg.insert(msg.end(), (char*)&udp, (char*)&udp + 2);
             msg.push_back((uc)cost);
         }
-        send(INFO.v[i].fd, msg.data(), msg.size(), 0);
+
+        if (send(INFO.v[i].fd, msg.data(), msg.size(), 0) < 0)
+            perror("send topology");
     }
 
     while (1) {
@@ -146,26 +185,39 @@ int main(int argc, char* argv[]) {
             sockaddr_in client;
             socklen_t len = sizeof(client);
             int cfd = accept(server.fd, (struct sockaddr*)&client, &len);
-            char msg[6];
-            recv(cfd, msg, 6, MSG_WAITALL);
 
-            uint32_t ip;
-            memcpy(&ip, msg, 4);
-            int udp = (uc)msg[4] * 256 + (uc)msg[5];
-            char id = 'A' + INFO.v.size();
-            INFO.v.push_back(VirtualNode(ntohl(ip), udp, id, cfd));
+            if (cfd >= 0) {
+                char msg[6];
+                int n = recv(cfd, msg, 6, MSG_WAITALL);
 
-            vector<char> reply;
-            us count = htons(1);
-            reply.insert(reply.end(), (char*)&count, (char*)&count + 2);
-            reply.push_back(id);
+                if (n != 6) {
+                    cerr << "VN registration failed: received "
+                         << n << " bytes" << endl;
+                    close(cfd);
+                } else {
+                    uint32_t ip;
+                    memcpy(&ip, msg, 4);
+                    int udp = (uc)msg[4] * 256 + (uc)msg[5];
+                    char id = 'A' + INFO.v.size();
+                    INFO.v.push_back(VirtualNode(ntohl(ip), udp, id, cfd));
 
-            ui addr = htonl(INFO.v.back().IPaddress);
-            us port = htons(INFO.v.back().UDPport);
-            reply.insert(reply.end(), (char*)&addr, (char*)&addr + 4);
-            reply.insert(reply.end(), (char*)&port, (char*)&port + 2);
-            reply.push_back(0);
-            send(cfd, reply.data(), reply.size(), 0);
+                    vector<char> reply;
+                    us count = htons(1);
+                    reply.insert(reply.end(), (char*)&count, (char*)&count + 2);
+                    reply.push_back(id);
+
+                    ui addr = htonl(INFO.v.back().IPaddress);
+                    us port = htons(INFO.v.back().UDPport);
+                    reply.insert(reply.end(), (char*)&addr, (char*)&addr + 4);
+                    reply.insert(reply.end(), (char*)&port, (char*)&port + 2);
+                    reply.push_back(0);
+
+                    if (send(cfd, reply.data(), reply.size(), 0) < 0)
+                        perror("send new VN reply");
+                }
+            } else {
+                perror("accept");
+            }
         }
 
         sleep(1);
@@ -180,6 +232,7 @@ int main(int argc, char* argv[]) {
             if (!costs.empty()) rows.push_back(costs);
         }
         nf.close();
+
         vector<vector<pair<char, int>>> ADJ(INFO.N);
 
         for (int i = 0; i < INFO.N - 1; i++) {
@@ -199,14 +252,15 @@ int main(int argc, char* argv[]) {
                 vector<char> msg;
                 us count = htons(INFO.adj[i].size() + 1);
                 msg.insert(msg.end(), (char*)&count, (char*)&count + 2);
-                
+
                 for (int j = 0; j < INFO.N; j++) {
                     int cost = -1;
                     if (i == j) cost = 0;
                     else {
-                        for (auto e: INFO.adj[i]) 
+                        for (auto e: INFO.adj[i])
                             if (e.first == INFO.v[j].Id) {
-                                cost = e.second; break;
+                                cost = e.second;
+                                break;
                             }
                     }
 
@@ -219,7 +273,9 @@ int main(int argc, char* argv[]) {
                     msg.insert(msg.end(), (char*)&udp, (char*)&udp + 2);
                     msg.push_back((uc)cost);
                 }
-                send(INFO.v[i].fd, msg.data(), msg.size(), 0);
+
+                if (send(INFO.v[i].fd, msg.data(), msg.size(), 0) < 0)
+                    perror("send topology update");
             }
         }
     }
